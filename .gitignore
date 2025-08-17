@@ -1,0 +1,7 @@
+/.venv
+/.vscode
+/b2b_ecommerce.db
+/dist
+/main.py
+/poetry.lock
+/__pycache__
