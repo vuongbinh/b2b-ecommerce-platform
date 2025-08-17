@@ -1,3 +1,0 @@
-@echo off
-echo Starting B2B E-commerce Platform...
-poetry run uvicorn app:app --reload --host 0.0.0.0 --port 8000
