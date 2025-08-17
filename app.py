@@ -1,5 +1,5 @@
 """
-B2B E-commerce Platform - Complete Backend
+B2B E-commerce Platform - Complete Backend (PostgreSQL Migration)
 """
 
 from fastapi import FastAPI, Depends, HTTPException, status, Form
@@ -25,17 +25,29 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database Configuration
-SQLALCHEMY_DATABASE_URL = "sqlite:///./b2b_ecommerce.db"
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}
+# Database Configuration - PostgreSQL
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", 
+    "postgresql://b2b_ecommerce_platform_user:XrQVSwJxcihJt8eqfx0y2iFjuY4L3haT@dpg-d2gtsr2dbo4c73ahnlt0-a.singapore-postgres.render.com/b2b_ecommerce_platform"
 )
+
+# Add SSL mode for Render PostgreSQL
+if "sslmode" not in DATABASE_URL:
+    DATABASE_URL += "?sslmode=prefer"
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,  # Enable connection health checks
+    pool_size=10,
+    max_overflow=20,
+    echo=False  # Set to True for SQL debugging
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Security Configuration
-SECRET_KEY = "development-secret-key-change-in-production"
+SECRET_KEY = os.getenv("SECRET_KEY", "development-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
@@ -55,19 +67,19 @@ class OrderStatus(str, Enum):
     DELIVERED = "delivered"
     CANCELLED = "cancelled"
 
-# Database Models
+# Database Models (Updated for PostgreSQL)
 class User(Base):
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    username = Column(String, unique=True, index=True, nullable=False)
-    full_name = Column(String, nullable=False)
-    company_name = Column(String)
-    role = Column(String, nullable=False)
-    hashed_password = Column(String, nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    username = Column(String(100), unique=True, index=True, nullable=False)
+    full_name = Column(String(255), nullable=False)
+    company_name = Column(String(255))
+    role = Column(String(50), nullable=False)
+    hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
     products = relationship("Product", back_populates="supplier")
@@ -78,16 +90,16 @@ class Product(Base):
     __tablename__ = "products"
     
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False, index=True)
+    name = Column(String(255), nullable=False, index=True)
     description = Column(Text)
     price = Column(Float, nullable=False)
     stock_quantity = Column(Integer, default=0)
     min_order_quantity = Column(Integer, default=1)
-    category = Column(String, index=True)
-    sku = Column(String, unique=True, index=True)
+    category = Column(String(100), index=True)
+    sku = Column(String(100), unique=True, index=True)
     supplier_id = Column(Integer, ForeignKey("users.id"))
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
     supplier = relationship("User", back_populates="products")
@@ -98,14 +110,14 @@ class Order(Base):
     __tablename__ = "orders"
     
     id = Column(Integer, primary_key=True, index=True)
-    order_number = Column(String, unique=True, index=True)
+    order_number = Column(String(100), unique=True, index=True)
     buyer_id = Column(Integer, ForeignKey("users.id"))
-    status = Column(String, default=OrderStatus.PENDING)
+    status = Column(String(50), default=OrderStatus.PENDING)
     total_amount = Column(Float, nullable=False)
     shipping_address = Column(Text)
     notes = Column(Text)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relationships
     buyer = relationship("User", foreign_keys=[buyer_id], back_populates="orders_as_buyer")
@@ -131,13 +143,13 @@ class CartItem(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     product_id = Column(Integer, ForeignKey("products.id"))
     quantity = Column(Integer, nullable=False)
-    added_at = Column(DateTime, server_default=func.now())
+    added_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
     user = relationship("User", back_populates="cart_items")
     product = relationship("Product", back_populates="cart_items")
 
-# Pydantic Models
+# Pydantic Models (unchanged)
 class UserCreate(BaseModel):
     email: EmailStr
     username: str
@@ -224,8 +236,8 @@ class Token(BaseModel):
 # FastAPI App
 app = FastAPI(
     title="B2B E-commerce Platform",
-    description="A comprehensive B2B e-commerce platform designed for Playwright testing",
-    version="1.0.0",
+    description="A comprehensive B2B e-commerce platform with PostgreSQL backend",
+    version="2.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc"
 )
@@ -243,8 +255,20 @@ app.add_middleware(
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Database initialization
+def init_database():
+    """Initialize database tables"""
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.error(f"Failed to create database tables: {str(e)}")
+        raise
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    init_database()
 
 # Dependency to get database session
 def get_db():
@@ -254,7 +278,7 @@ def get_db():
     finally:
         db.close()
 
-# Authentication utilities
+# Authentication utilities (unchanged)
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -293,7 +317,7 @@ def get_current_user(
         raise credentials_exception
     return user
 
-# Routes
+# Routes (unchanged but with improved error handling)
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
     """Serve the main frontend application"""
@@ -309,9 +333,10 @@ async def read_root():
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint with database test"""
+    """Health check endpoint with PostgreSQL database test"""
     try:
         db = SessionLocal()
+        # Test database connection
         result = db.execute(text("SELECT 1")).fetchone()
         
         if result:
@@ -322,10 +347,14 @@ async def health_check():
             
             return {
                 "status": "healthy",
-                "message": "B2B E-commerce Platform is running",
-                "version": "1.0.0",
+                "message": "B2B E-commerce Platform is running with PostgreSQL",
+                "version": "2.0.0",
                 "timestamp": datetime.utcnow(),
-                "database": "connected",
+                "database": {
+                    "type": "PostgreSQL",
+                    "status": "connected",
+                    "host": "dpg-d2gtsr2dbo4c73ahn1t0-a.singapore-postgres.render.com"
+                },
                 "statistics": {
                     "users": user_count,
                     "products": product_count,
@@ -343,15 +372,19 @@ async def health_check():
             "message": "Service issues detected",
             "error": str(e),
             "timestamp": datetime.utcnow(),
-            "database": "disconnected"
+            "database": {
+                "type": "PostgreSQL",
+                "status": "disconnected"
+            }
         }
 
 @app.get("/api/test")
 async def test_endpoint():
     """Test endpoint for API verification"""
     return {
-        "message": "API is working correctly",
+        "message": "API is working correctly with PostgreSQL",
         "timestamp": datetime.utcnow(),
+        "database": "PostgreSQL on Render",
         "endpoints": {
             "frontend": "/",
             "api_docs": "/api/docs",
@@ -366,26 +399,31 @@ async def test_endpoint():
 @app.post("/api/auth/register", response_model=UserResponse)
 async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     """Register a new user"""
-    db_user = db.query(User).filter(
-        (User.email == user.email) | (User.username == user.username)
-    ).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email or username already registered")
-    
-    hashed_password = get_password_hash(user.password)
-    db_user = User(
-        email=user.email,
-        username=user.username,
-        full_name=user.full_name,
-        company_name=user.company_name,
-        role=user.role,
-        hashed_password=hashed_password
-    )
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    logger.info(f"New user registered: {user.username} ({user.role})")
-    return db_user
+    try:
+        db_user = db.query(User).filter(
+            (User.email == user.email) | (User.username == user.username)
+        ).first()
+        if db_user:
+            raise HTTPException(status_code=400, detail="Email or username already registered")
+        
+        hashed_password = get_password_hash(user.password)
+        db_user = User(
+            email=user.email,
+            username=user.username,
+            full_name=user.full_name,
+            company_name=user.company_name,
+            role=user.role,
+            hashed_password=hashed_password
+        )
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        logger.info(f"New user registered: {user.username} ({user.role})")
+        return db_user
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Registration failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Registration failed")
 
 @app.post("/api/auth/login", response_model=Token)
 async def login_user(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
@@ -450,18 +488,23 @@ async def create_product(
             detail="Only suppliers and admins can create products"
         )
     
-    existing_product = db.query(Product).filter(Product.sku == product.sku).first()
-    if existing_product:
-        raise HTTPException(status_code=400, detail="Product with this SKU already exists")
-    
-    db_product = Product(
-        **product.dict(),
-        supplier_id=current_user.id
-    )
-    db.add(db_product)
-    db.commit()
-    db.refresh(db_product)
-    return db_product
+    try:
+        existing_product = db.query(Product).filter(Product.sku == product.sku).first()
+        if existing_product:
+            raise HTTPException(status_code=400, detail="Product with this SKU already exists")
+        
+        db_product = Product(
+            **product.dict(),
+            supplier_id=current_user.id
+        )
+        db.add(db_product)
+        db.commit()
+        db.refresh(db_product)
+        return db_product
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Product creation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Product creation failed")
 
 # Cart Routes
 @app.post("/api/cart/add")
@@ -477,27 +520,32 @@ async def add_to_cart(
             detail="Only buyers can add items to cart"
         )
     
-    product = db.query(Product).filter(Product.id == item.product_id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    
-    existing_item = db.query(CartItem).filter(
-        CartItem.user_id == current_user.id,
-        CartItem.product_id == item.product_id
-    ).first()
-    
-    if existing_item:
-        existing_item.quantity += item.quantity
-    else:
-        cart_item = CartItem(
-            user_id=current_user.id,
-            product_id=item.product_id,
-            quantity=item.quantity
-        )
-        db.add(cart_item)
-    
-    db.commit()
-    return {"message": "Item added to cart successfully"}
+    try:
+        product = db.query(Product).filter(Product.id == item.product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        existing_item = db.query(CartItem).filter(
+            CartItem.user_id == current_user.id,
+            CartItem.product_id == item.product_id
+        ).first()
+        
+        if existing_item:
+            existing_item.quantity += item.quantity
+        else:
+            cart_item = CartItem(
+                user_id=current_user.id,
+                product_id=item.product_id,
+                quantity=item.quantity
+            )
+            db.add(cart_item)
+        
+        db.commit()
+        return {"message": "Item added to cart successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Add to cart failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to add item to cart")
 
 @app.get("/api/cart", response_model=List[CartItemResponse])
 async def get_cart(
@@ -529,17 +577,22 @@ async def remove_from_cart(
     db: Session = Depends(get_db)
 ):
     """Remove item from cart"""
-    cart_item = db.query(CartItem).filter(
-        CartItem.id == item_id,
-        CartItem.user_id == current_user.id
-    ).first()
-    
-    if not cart_item:
-        raise HTTPException(status_code=404, detail="Cart item not found")
-    
-    db.delete(cart_item)
-    db.commit()
-    return {"message": "Item removed from cart"}
+    try:
+        cart_item = db.query(CartItem).filter(
+            CartItem.id == item_id,
+            CartItem.user_id == current_user.id
+        ).first()
+        
+        if not cart_item:
+            raise HTTPException(status_code=404, detail="Cart item not found")
+        
+        db.delete(cart_item)
+        db.commit()
+        return {"message": "Item removed from cart"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Remove from cart failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to remove item from cart")
 
 @app.delete("/api/cart/clear")
 async def clear_cart(
@@ -547,9 +600,14 @@ async def clear_cart(
     db: Session = Depends(get_db)
 ):
     """Clear user's cart"""
-    deleted_count = db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
-    db.commit()
-    return {"message": f"Cart cleared. {deleted_count} items removed."}
+    try:
+        deleted_count = db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
+        db.commit()
+        return {"message": f"Cart cleared. {deleted_count} items removed."}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Clear cart failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear cart")
 
 # Order Routes
 @app.post("/api/orders", response_model=OrderResponse)
@@ -565,58 +623,63 @@ async def create_order(
             detail="Only buyers can create orders"
         )
     
-    cart_items = db.query(CartItem).filter(CartItem.user_id == current_user.id).all()
-    if not cart_items:
-        raise HTTPException(status_code=400, detail="Cart is empty")
-    
-    total_amount = 0
-    order_items_data = []
-    
-    for cart_item in cart_items:
-        product = db.query(Product).filter(Product.id == cart_item.product_id).first()
-        if not product:
-            continue
+    try:
+        cart_items = db.query(CartItem).filter(CartItem.user_id == current_user.id).all()
+        if not cart_items:
+            raise HTTPException(status_code=400, detail="Cart is empty")
         
-        item_total = product.price * cart_item.quantity
-        total_amount += item_total
+        total_amount = 0
+        order_items_data = []
         
-        order_items_data.append({
-            "product_id": product.id,
-            "quantity": cart_item.quantity,
-            "price": product.price
-        })
-    
-    # Generate order number
-    order_count = db.query(Order).count()
-    order_number = f"ORD-{order_count + 1:06d}"
-    
-    # Create order
-    db_order = Order(
-        order_number=order_number,
-        buyer_id=current_user.id,
-        total_amount=total_amount,
-        shipping_address=order.shipping_address,
-        notes=order.notes
-    )
-    db.add(db_order)
-    db.commit()
-    db.refresh(db_order)
-    
-    # Create order items
-    for item_data in order_items_data:
-        order_item = OrderItem(
-            order_id=db_order.id,
-            **item_data
+        for cart_item in cart_items:
+            product = db.query(Product).filter(Product.id == cart_item.product_id).first()
+            if not product:
+                continue
+            
+            item_total = product.price * cart_item.quantity
+            total_amount += item_total
+            
+            order_items_data.append({
+                "product_id": product.id,
+                "quantity": cart_item.quantity,
+                "price": product.price
+            })
+        
+        # Generate order number
+        order_count = db.query(Order).count()
+        order_number = f"ORD-{order_count + 1:06d}"
+        
+        # Create order
+        db_order = Order(
+            order_number=order_number,
+            buyer_id=current_user.id,
+            total_amount=total_amount,
+            shipping_address=order.shipping_address,
+            notes=order.notes
         )
-        db.add(order_item)
-    
-    # Clear cart
-    db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
-    
-    db.commit()
-    logger.info(f"Order created: {order_number} by {current_user.username}")
-    
-    return db_order
+        db.add(db_order)
+        db.commit()
+        db.refresh(db_order)
+        
+        # Create order items
+        for item_data in order_items_data:
+            order_item = OrderItem(
+                order_id=db_order.id,
+                **item_data
+            )
+            db.add(order_item)
+        
+        # Clear cart
+        db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
+        
+        db.commit()
+        logger.info(f"Order created: {order_number} by {current_user.username}")
+        
+        return db_order
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Order creation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create order")
 
 @app.get("/api/orders", response_model=List[OrderResponse])
 async def list_orders(
@@ -641,111 +704,117 @@ async def list_orders(
 async def seed_database(db: Session = Depends(get_db)):
     """Seed database with test data"""
     
-    # Create test users
-    test_users = [
-        {
-            "email": "admin@test.com",
-            "username": "admin",
-            "full_name": "System Admin",
-            "company_name": "Platform Admin",
-            "role": UserRole.ADMIN,
-            "password": "admin123"
-        },
-        {
-            "email": "supplier1@test.com",
-            "username": "supplier1",
-            "full_name": "John Supplier",
-            "company_name": "Tech Supplies Co.",
-            "role": UserRole.SUPPLIER,
-            "password": "supplier123"
-        },
-        {
-            "email": "buyer1@test.com",
-            "username": "buyer1",
-            "full_name": "Jane Buyer",
-            "company_name": "ABC Corporation",
-            "role": UserRole.BUYER,
-            "password": "buyer123"
+    try:
+        # Create test users
+        test_users = [
+            {
+                "email": "admin@test.com",
+                "username": "admin",
+                "full_name": "System Admin",
+                "company_name": "Platform Admin",
+                "role": UserRole.ADMIN,
+                "password": "admin123"
+            },
+            {
+                "email": "supplier1@test.com",
+                "username": "supplier1",
+                "full_name": "John Supplier",
+                "company_name": "Tech Supplies Co.",
+                "role": UserRole.SUPPLIER,
+                "password": "supplier123"
+            },
+            {
+                "email": "buyer1@test.com",
+                "username": "buyer1",
+                "full_name": "Jane Buyer",
+                "company_name": "ABC Corporation",
+                "role": UserRole.BUYER,
+                "password": "buyer123"
+            }
+        ]
+        
+        created_users = {}
+        for user_data in test_users:
+            existing_user = db.query(User).filter(User.email == user_data["email"]).first()
+            if not existing_user:
+                hashed_password = get_password_hash(user_data["password"])
+                user = User(
+                    email=user_data["email"],
+                    username=user_data["username"],
+                    full_name=user_data["full_name"],
+                    company_name=user_data["company_name"],
+                    role=user_data["role"],
+                    hashed_password=hashed_password
+                )
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                created_users[user_data["role"]] = user
+            else:
+                created_users[user_data["role"]] = existing_user
+        
+        # Get supplier for products
+        supplier = created_users.get(UserRole.SUPPLIER) or db.query(User).filter(User.role == UserRole.SUPPLIER).first()
+        
+        # Create test products
+        test_products = [
+            {
+                "name": "Laptop Dell XPS 13",
+                "description": "High-performance ultrabook for business professionals",
+                "price": 1299.99,
+                "stock_quantity": 50,
+                "min_order_quantity": 1,
+                "category": "Electronics",
+                "sku": "DELL-XPS13-001"
+            },
+            {
+                "name": "Office Chair Ergonomic",
+                "description": "Comfortable ergonomic office chair with lumbar support",
+                "price": 299.99,
+                "stock_quantity": 30,
+                "min_order_quantity": 5,
+                "category": "Furniture",
+                "sku": "CHAIR-ERG-001"
+            },
+            {
+                "name": "Wireless Mouse Logitech",
+                "description": "Wireless optical mouse with USB receiver",
+                "price": 29.99,
+                "stock_quantity": 100,
+                "min_order_quantity": 10,
+                "category": "Electronics",
+                "sku": "MOUSE-LOG-001"
+            }
+        ]
+        
+        products_created = 0
+        for product_data in test_products:
+            existing_product = db.query(Product).filter(Product.sku == product_data["sku"]).first()
+            if not existing_product:
+                product = Product(
+                    **product_data,
+                    supplier_id=supplier.id
+                )
+                db.add(product)
+                products_created += 1
+        
+        db.commit()
+        
+        return {
+            "message": "Database seeded successfully with test data",
+            "database": "PostgreSQL on Render",
+            "users_created": len(created_users),
+            "products_created": products_created,
+            "test_credentials": {
+                "admin": "admin / admin123",
+                "supplier": "supplier1 / supplier123", 
+                "buyer": "buyer1 / buyer123"
+            }
         }
-    ]
-    
-    created_users = {}
-    for user_data in test_users:
-        existing_user = db.query(User).filter(User.email == user_data["email"]).first()
-        if not existing_user:
-            hashed_password = get_password_hash(user_data["password"])
-            user = User(
-                email=user_data["email"],
-                username=user_data["username"],
-                full_name=user_data["full_name"],
-                company_name=user_data["company_name"],
-                role=user_data["role"],
-                hashed_password=hashed_password
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            created_users[user_data["role"]] = user
-        else:
-            created_users[user_data["role"]] = existing_user
-    
-    # Get supplier for products
-    supplier = created_users.get(UserRole.SUPPLIER) or db.query(User).filter(User.role == UserRole.SUPPLIER).first()
-    
-    # Create test products
-    test_products = [
-        {
-            "name": "Laptop Dell XPS 13",
-            "description": "High-performance ultrabook for business professionals",
-            "price": 1299.99,
-            "stock_quantity": 50,
-            "min_order_quantity": 1,
-            "category": "Electronics",
-            "sku": "DELL-XPS13-001"
-        },
-        {
-            "name": "Office Chair Ergonomic",
-            "description": "Comfortable ergonomic office chair with lumbar support",
-            "price": 299.99,
-            "stock_quantity": 30,
-            "min_order_quantity": 5,
-            "category": "Furniture",
-            "sku": "CHAIR-ERG-001"
-        },
-        {
-            "name": "Wireless Mouse Logitech",
-            "description": "Wireless optical mouse with USB receiver",
-            "price": 29.99,
-            "stock_quantity": 100,
-            "min_order_quantity": 10,
-            "category": "Electronics",
-            "sku": "MOUSE-LOG-001"
-        }
-    ]
-    
-    products_created = 0
-    for product_data in test_products:
-        existing_product = db.query(Product).filter(Product.sku == product_data["sku"]).first()
-        if not existing_product:
-            product = Product(
-                **product_data,
-                supplier_id=supplier.id
-            )
-            db.add(product)
-            products_created += 1
-    
-    db.commit()
-    
-    return {
-        "message": "Database seeded successfully with test data",
-        "users_created": len(created_users),
-        "products_created": products_created,
-        "test_credentials": {
-            "admin": "admin / admin123",
-            "supplier": "supplier1 / supplier123", 
-            "buyer": "buyer1 / buyer123"
-        }
-    }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Database seeding failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to seed database")
 
 if __name__ == "__main__":
     uvicorn.run(
