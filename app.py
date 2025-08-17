@@ -1,17 +1,17 @@
 """
-B2B E-commerce Platform - Complete Backend (PostgreSQL Migration)
+Fixed FastAPI Application for Render Deployment
+Single file structure to avoid import issues
 """
 
 from fastapi import FastAPI, Depends, HTTPException, status, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.sql import func
-from pydantic import BaseModel, EmailStr, validator
+from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
@@ -25,29 +25,88 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database Configuration - PostgreSQL
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql://b2b_ecommerce_platform_user:XrQVSwJxcihJt8eqfx0y2iFjuY4L3haT@dpg-d2gtsr2dbo4c73ahnlt0-a.singapore-postgres.render.com/b2b_ecommerce_platform"
-)
+# Database Connection with multiple fallbacks for Render
+def create_database_engine():
+    """Create database engine with connection fallback strategies for Render"""
 
-# Add SSL mode for Render PostgreSQL
-if "sslmode" not in DATABASE_URL:
-    DATABASE_URL += "?sslmode=prefer"
+    # Get DATABASE_URL from environment (Render sets this automatically)
+    database_url = os.getenv("DATABASE_URL")
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,  # Enable connection health checks
-    pool_size=10,
-    max_overflow=20,
-    echo=False  # Set to True for SQL debugging
-)
+    if database_url:
+        # Render PostgreSQL URL - handle both postgres:// and postgresql:// schemas
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql://", 1)
 
+        # Add psycopg2 if not present
+        if "postgresql://" in database_url and "psycopg2" not in database_url:
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg2://")
+
+        logger.info("Using DATABASE_URL from environment")
+    else:
+        # Fallback connection strings for manual deployment
+        connection_configs = [
+            "postgresql+psycopg2://b2b_ecommerce_platform_user:XrQVSwJxcihJt8eqfx0y2iFjuY4L3haT@dpg-d2gtsr2dbo4c73ahn1t0-a.singapore-postgres.render.com:5432/b2b_ecommerce_platform?sslmode=prefer",
+            "postgresql+psycopg2://b2b_ecommerce_platform_user:XrQVSwJxcihJt8eqfx0y2iFjuY4L3haT@dpg-d2gtsr2dbo4c73ahn1t0-a.singapore-postgres.render.com:5432/b2b_ecommerce_platform?sslmode=allow"
+        ]
+
+        for config_url in connection_configs:
+            try:
+                logger.info(f"Attempting connection...")
+                engine = create_engine(
+                    config_url,
+                    pool_pre_ping=True,
+                    pool_size=5,
+                    max_overflow=10,
+                    pool_timeout=30,
+                    pool_recycle=3600,
+                    connect_args={"connect_timeout": 30}
+                )
+
+                # Test the connection
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT 1")).fetchone()
+                    if result:
+                        logger.info("✅ Database connection successful")
+                        return engine
+
+            except Exception as e:
+                logger.warning(f"❌ Connection failed: {str(e)}")
+                continue
+
+        # If all PostgreSQL attempts fail, use SQLite for local development
+        logger.warning("❌ All PostgreSQL connections failed. Using SQLite fallback...")
+        database_url = "sqlite:///./b2b_ecommerce.db"
+
+    try:
+        engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=3600,
+            connect_args={"check_same_thread": False} if "sqlite" in database_url else {"connect_timeout": 30}
+        )
+
+        # Test connection
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT 1")).fetchone()
+            if result:
+                db_type = "PostgreSQL" if "postgresql" in database_url else "SQLite"
+                logger.info(f"✅ {db_type} connection successful")
+                return engine
+
+    except Exception as e:
+        logger.error(f"❌ Database connection failed: {str(e)}")
+        raise Exception("❌ All database connections failed")
+
+# Create engine
+engine = create_database_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Security Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "development-secret-key-change-in-production")
+SECRET_KEY = os.getenv("SECRET_KEY", "render-production-secret-key-b2b-ecommerce-2025")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
@@ -67,10 +126,10 @@ class OrderStatus(str, Enum):
     DELIVERED = "delivered"
     CANCELLED = "cancelled"
 
-# Database Models (Updated for PostgreSQL)
+# Database Models
 class User(Base):
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     username = Column(String(100), unique=True, index=True, nullable=False)
@@ -79,8 +138,8 @@ class User(Base):
     role = Column(String(50), nullable=False)
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+    created_at = Column(DateTime, server_default=func.now())
+
     # Relationships
     products = relationship("Product", back_populates="supplier")
     orders_as_buyer = relationship("Order", foreign_keys="[Order.buyer_id]", back_populates="buyer")
@@ -88,7 +147,7 @@ class User(Base):
 
 class Product(Base):
     __tablename__ = "products"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text)
@@ -99,8 +158,8 @@ class Product(Base):
     sku = Column(String(100), unique=True, index=True)
     supplier_id = Column(Integer, ForeignKey("users.id"))
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+    created_at = Column(DateTime, server_default=func.now())
+
     # Relationships
     supplier = relationship("User", back_populates="products")
     order_items = relationship("OrderItem", back_populates="product")
@@ -108,7 +167,7 @@ class Product(Base):
 
 class Order(Base):
     __tablename__ = "orders"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     order_number = Column(String(100), unique=True, index=True)
     buyer_id = Column(Integer, ForeignKey("users.id"))
@@ -116,40 +175,40 @@ class Order(Base):
     total_amount = Column(Float, nullable=False)
     shipping_address = Column(Text)
     notes = Column(Text)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
     # Relationships
     buyer = relationship("User", foreign_keys=[buyer_id], back_populates="orders_as_buyer")
     order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
 class OrderItem(Base):
     __tablename__ = "order_items"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"))
     product_id = Column(Integer, ForeignKey("products.id"))
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=False)
-    
+
     # Relationships
     order = relationship("Order", back_populates="order_items")
     product = relationship("Product", back_populates="order_items")
 
 class CartItem(Base):
     __tablename__ = "cart_items"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     product_id = Column(Integer, ForeignKey("products.id"))
     quantity = Column(Integer, nullable=False)
-    added_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+    added_at = Column(DateTime, server_default=func.now())
+
     # Relationships
     user = relationship("User", back_populates="cart_items")
     product = relationship("Product", back_populates="cart_items")
 
-# Pydantic Models (unchanged)
+# Pydantic Models
 class UserCreate(BaseModel):
     email: EmailStr
     username: str
@@ -167,7 +226,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -193,7 +252,7 @@ class ProductResponse(BaseModel):
     supplier_name: Optional[str] = None
     is_active: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -208,7 +267,7 @@ class CartItemResponse(BaseModel):
     product_price: float
     quantity: int
     total_price: float
-    
+
     class Config:
         from_attributes = True
 
@@ -225,7 +284,7 @@ class OrderResponse(BaseModel):
     shipping_address: str
     notes: Optional[str]
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -236,7 +295,7 @@ class Token(BaseModel):
 # FastAPI App
 app = FastAPI(
     title="B2B E-commerce Platform",
-    description="A comprehensive B2B e-commerce platform with PostgreSQL backend",
+    description="A comprehensive B2B e-commerce platform for Render deployment",
     version="2.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc"
@@ -251,24 +310,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create static directory and mount
-os.makedirs("static", exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
 # Database initialization
 def init_database():
     """Initialize database tables"""
     try:
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created successfully")
+        return True
     except Exception as e:
         logger.error(f"Failed to create database tables: {str(e)}")
-        raise
+        return False
 
 # Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
-    init_database()
+    success = init_database()
+    if success:
+        logger.info("🚀 Application started successfully")
+    else:
+        logger.error("❌ Application startup failed")
 
 # Dependency to get database session
 def get_db():
@@ -278,7 +338,7 @@ def get_db():
     finally:
         db.close()
 
-# Authentication utilities (unchanged)
+# Authentication utilities
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -296,7 +356,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security), 
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
     credentials_exception = HTTPException(
@@ -311,80 +371,140 @@ def get_current_user(
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    
+
     user = db.query(User).filter(User.username == username).first()
     if user is None:
         raise credentials_exception
     return user
 
-# Routes (unchanged but with improved error handling)
+# Routes
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """Serve the main frontend application"""
-    try:
-        with open("index.html", "r", encoding="utf-8") as f:
-            content = f.read()
-        return HTMLResponse(content=content, status_code=200)
-    except FileNotFoundError:
-        return HTMLResponse(
-            content="<h1>Frontend not found</h1><p>Please ensure index.html is in the project root.</p>",
-            status_code=404
-        )
+    """Serve the main application homepage"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>B2B E-commerce Platform</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
+            .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            .header { text-align: center; color: #333; border-bottom: 2px solid #007bff; padding-bottom: 20px; margin-bottom: 30px; }
+            .section { margin: 20px 0; }
+            .api-link { display: inline-block; margin: 10px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+            .api-link:hover { background: #0056b3; }
+            .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
+            .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+            .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🏢 B2B E-commerce Platform</h1>
+                <p>Comprehensive business-to-business e-commerce solution</p>
+            </div>
+            
+            <div class="status success">
+                ✅ Application is running successfully on Render!
+            </div>
+            
+            <div class="section">
+                <h3>📚 API Documentation</h3>
+                <a href="/api/docs" class="api-link">Swagger UI</a>
+                <a href="/api/redoc" class="api-link">ReDoc</a>
+            </div>
+            
+            <div class="section">
+                <h3>🔍 API Endpoints</h3>
+                <a href="/api/health" class="api-link">Health Check</a>
+                <a href="/api/test" class="api-link">Test Endpoint</a>
+                <a href="/api/products" class="api-link">Products</a>
+            </div>
+            
+            <div class="section">
+                <h3>🧪 Test Data</h3>
+                <div class="info">
+                    Use the seed endpoint to create test data: <code>POST /api/test/seed-database</code>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h3>🔐 Test Credentials</h3>
+                <ul>
+                    <li><strong>Admin:</strong> admin / admin123</li>
+                    <li><strong>Supplier:</strong> supplier1 / supplier123</li>
+                    <li><strong>Buyer:</strong> buyer1 / buyer123</li>
+                </ul>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint with PostgreSQL database test"""
+    """Health check endpoint with database test"""
     try:
         db = SessionLocal()
-        # Test database connection
         result = db.execute(text("SELECT 1")).fetchone()
-        
+
         if result:
             user_count = db.query(User).count()
             product_count = db.query(Product).count()
             order_count = db.query(Order).count()
             db.close()
-            
+
+            # Determine database type
+            db_url = str(engine.url)
+            db_type = "PostgreSQL" if "postgresql" in db_url else "SQLite"
+
             return {
                 "status": "healthy",
-                "message": "B2B E-commerce Platform is running with PostgreSQL",
+                "message": "B2B E-commerce Platform is running on Render",
                 "version": "2.0.0",
                 "timestamp": datetime.utcnow(),
                 "database": {
-                    "type": "PostgreSQL",
+                    "type": db_type,
                     "status": "connected",
-                    "host": "dpg-d2gtsr2dbo4c73ahn1t0-a.singapore-postgres.render.com"
+                    "url_masked": db_url.replace(db_url.split('@')[0].split('//')[1], "***:***") if '@' in db_url else "local"
                 },
                 "statistics": {
                     "users": user_count,
                     "products": product_count,
                     "orders": order_count
+                },
+                "deployment": {
+                    "platform": "Render",
+                    "environment": os.getenv("RENDER_SERVICE_NAME", "local")
                 }
             }
         else:
             db.close()
             raise Exception("Database query failed")
-            
+
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
-        return {
-            "status": "unhealthy",
-            "message": "Service issues detected",
-            "error": str(e),
-            "timestamp": datetime.utcnow(),
-            "database": {
-                "type": "PostgreSQL",
-                "status": "disconnected"
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "message": "Service issues detected",
+                "error": str(e),
+                "timestamp": datetime.utcnow(),
+                "database": {"status": "disconnected"}
             }
-        }
+        )
 
 @app.get("/api/test")
 async def test_endpoint():
     """Test endpoint for API verification"""
     return {
-        "message": "API is working correctly with PostgreSQL",
+        "message": "API is working correctly on Render",
         "timestamp": datetime.utcnow(),
-        "database": "PostgreSQL on Render",
+        "platform": "Render",
+        "service": os.getenv("RENDER_SERVICE_NAME", "b2b-ecommerce"),
         "endpoints": {
             "frontend": "/",
             "api_docs": "/api/docs",
@@ -405,7 +525,7 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
         ).first()
         if db_user:
             raise HTTPException(status_code=400, detail="Email or username already registered")
-        
+
         hashed_password = get_password_hash(user.password)
         db_user = User(
             email=user.email,
@@ -435,7 +555,7 @@ async def login_user(username: str = Form(...), password: str = Form(...), db: S
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
@@ -451,34 +571,34 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 # Product Routes
 @app.get("/api/products", response_model=List[ProductResponse])
 async def list_products(
-    skip: int = 0, 
-    limit: int = 100, 
+    skip: int = 0,
+    limit: int = 100,
     category: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """List all active products with optional filtering"""
     query = db.query(Product).filter(Product.is_active == True)
-    
+
     if category:
         query = query.filter(Product.category == category)
-    
+
     if search:
         query = query.filter(Product.name.ilike(f"%{search}%"))
-    
+
     products = query.offset(skip).limit(limit).all()
-    
+
     # Add supplier name to each product
     for product in products:
         supplier = db.query(User).filter(User.id == product.supplier_id).first()
         product.supplier_name = supplier.company_name if supplier else "Unknown"
-    
+
     return products
 
 @app.post("/api/products", response_model=ProductResponse)
 async def create_product(
-    product: ProductCreate, 
-    current_user: User = Depends(get_current_user), 
+    product: ProductCreate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Create a new product (Suppliers and Admins only)"""
@@ -487,12 +607,12 @@ async def create_product(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only suppliers and admins can create products"
         )
-    
+
     try:
         existing_product = db.query(Product).filter(Product.sku == product.sku).first()
         if existing_product:
             raise HTTPException(status_code=400, detail="Product with this SKU already exists")
-        
+
         db_product = Product(
             **product.dict(),
             supplier_id=current_user.id
@@ -519,17 +639,17 @@ async def add_to_cart(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only buyers can add items to cart"
         )
-    
+
     try:
         product = db.query(Product).filter(Product.id == item.product_id).first()
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
-        
+
         existing_item = db.query(CartItem).filter(
             CartItem.user_id == current_user.id,
             CartItem.product_id == item.product_id
         ).first()
-        
+
         if existing_item:
             existing_item.quantity += item.quantity
         else:
@@ -539,7 +659,7 @@ async def add_to_cart(
                 quantity=item.quantity
             )
             db.add(cart_item)
-        
+
         db.commit()
         return {"message": "Item added to cart successfully"}
     except Exception as e:
@@ -554,7 +674,7 @@ async def get_cart(
 ):
     """Get user's cart items"""
     cart_items = db.query(CartItem).filter(CartItem.user_id == current_user.id).all()
-    
+
     result = []
     for item in cart_items:
         product = db.query(Product).filter(Product.id == item.product_id).first()
@@ -567,7 +687,7 @@ async def get_cart(
                 "quantity": item.quantity,
                 "total_price": product.price * item.quantity
             })
-    
+
     return result
 
 @app.delete("/api/cart/{item_id}")
@@ -582,10 +702,10 @@ async def remove_from_cart(
             CartItem.id == item_id,
             CartItem.user_id == current_user.id
         ).first()
-        
+
         if not cart_item:
             raise HTTPException(status_code=404, detail="Cart item not found")
-        
+
         db.delete(cart_item)
         db.commit()
         return {"message": "Item removed from cart"}
@@ -622,33 +742,33 @@ async def create_order(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only buyers can create orders"
         )
-    
+
     try:
         cart_items = db.query(CartItem).filter(CartItem.user_id == current_user.id).all()
         if not cart_items:
             raise HTTPException(status_code=400, detail="Cart is empty")
-        
+
         total_amount = 0
         order_items_data = []
-        
+
         for cart_item in cart_items:
             product = db.query(Product).filter(Product.id == cart_item.product_id).first()
             if not product:
                 continue
-            
+
             item_total = product.price * cart_item.quantity
             total_amount += item_total
-            
+
             order_items_data.append({
                 "product_id": product.id,
                 "quantity": cart_item.quantity,
                 "price": product.price
             })
-        
+
         # Generate order number
         order_count = db.query(Order).count()
         order_number = f"ORD-{order_count + 1:06d}"
-        
+
         # Create order
         db_order = Order(
             order_number=order_number,
@@ -660,7 +780,7 @@ async def create_order(
         db.add(db_order)
         db.commit()
         db.refresh(db_order)
-        
+
         # Create order items
         for item_data in order_items_data:
             order_item = OrderItem(
@@ -668,13 +788,13 @@ async def create_order(
                 **item_data
             )
             db.add(order_item)
-        
+
         # Clear cart
         db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
-        
+
         db.commit()
         logger.info(f"Order created: {order_number} by {current_user.username}")
-        
+
         return db_order
     except Exception as e:
         db.rollback()
@@ -696,14 +816,14 @@ async def list_orders(
         orders = db.query(Order).join(OrderItem).join(Product).filter(
             Product.supplier_id == current_user.id
         ).distinct().all()
-    
+
     return orders
 
 # Testing Routes
 @app.post("/api/test/seed-database")
 async def seed_database(db: Session = Depends(get_db)):
     """Seed database with test data"""
-    
+
     try:
         # Create test users
         test_users = [
@@ -732,7 +852,7 @@ async def seed_database(db: Session = Depends(get_db)):
                 "password": "buyer123"
             }
         ]
-        
+
         created_users = {}
         for user_data in test_users:
             existing_user = db.query(User).filter(User.email == user_data["email"]).first()
@@ -752,10 +872,10 @@ async def seed_database(db: Session = Depends(get_db)):
                 created_users[user_data["role"]] = user
             else:
                 created_users[user_data["role"]] = existing_user
-        
+
         # Get supplier for products
         supplier = created_users.get(UserRole.SUPPLIER) or db.query(User).filter(User.role == UserRole.SUPPLIER).first()
-        
+
         # Create test products
         test_products = [
             {
@@ -784,9 +904,27 @@ async def seed_database(db: Session = Depends(get_db)):
                 "min_order_quantity": 10,
                 "category": "Electronics",
                 "sku": "MOUSE-LOG-001"
+            },
+            {
+                "name": "Standing Desk Converter",
+                "description": "Adjustable standing desk converter for healthy working",
+                "price": 199.99,
+                "stock_quantity": 25,
+                "min_order_quantity": 1,
+                "category": "Furniture",
+                "sku": "DESK-CONV-001"
+            },
+            {
+                "name": "Noise Cancelling Headphones",
+                "description": "Professional noise cancelling headphones for office use",
+                "price": 149.99,
+                "stock_quantity": 40,
+                "min_order_quantity": 2,
+                "category": "Electronics",
+                "sku": "HEADPHONE-001"
             }
         ]
-        
+
         products_created = 0
         for product_data in test_products:
             existing_product = db.query(Product).filter(Product.sku == product_data["sku"]).first()
@@ -797,30 +935,135 @@ async def seed_database(db: Session = Depends(get_db)):
                 )
                 db.add(product)
                 products_created += 1
-        
+
         db.commit()
-        
+
+        # Get counts for response
+        user_count = db.query(User).count()
+        product_count = db.query(Product).count()
+
         return {
             "message": "Database seeded successfully with test data",
-            "database": "PostgreSQL on Render",
+            "platform": "Render",
+            "database": "PostgreSQL" if "postgresql" in str(engine.url) else "SQLite",
             "users_created": len(created_users),
             "products_created": products_created,
+            "total_users": user_count,
+            "total_products": product_count,
             "test_credentials": {
                 "admin": "admin / admin123",
-                "supplier": "supplier1 / supplier123", 
+                "supplier": "supplier1 / supplier123",
                 "buyer": "buyer1 / buyer123"
-            }
+            },
+            "next_steps": [
+                "Test authentication with the provided credentials",
+                "Explore the API documentation at /api/docs",
+                "Try creating products as a supplier",
+                "Test the shopping cart as a buyer"
+            ]
         }
     except Exception as e:
         db.rollback()
         logger.error(f"Database seeding failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to seed database")
+        raise HTTPException(status_code=500, detail=f"Failed to seed database: {str(e)}")
 
+# Additional utility endpoints for Render
+@app.get("/api/render/status")
+async def render_status():
+    """Render-specific status endpoint"""
+    return {
+        "service": os.getenv("RENDER_SERVICE_NAME", "b2b-ecommerce"),
+        "service_id": os.getenv("RENDER_SERVICE_ID", "unknown"),
+        "region": os.getenv("RENDER_REGION", "unknown"),
+        "commit_sha": os.getenv("RENDER_GIT_COMMIT", "unknown"),
+        "branch": os.getenv("RENDER_GIT_BRANCH", "unknown"),
+        "timestamp": datetime.utcnow(),
+        "python_version": os.sys.version,
+        "environment_vars": {
+            "DATABASE_URL": "configured" if os.getenv("DATABASE_URL") else "not set",
+            "SECRET_KEY": "configured" if os.getenv("SECRET_KEY") else "using default"
+        }
+    }
+
+@app.get("/api/database/info")
+async def database_info():
+    """Database connection information"""
+    try:
+        db = SessionLocal()
+
+        # Test connection
+        result = db.execute(text("SELECT version()")).fetchone()
+        db_version = result[0] if result else "Unknown"
+
+        # Get table info
+        table_info = {}
+        tables = ['users', 'products', 'orders', 'order_items', 'cart_items']
+
+        for table in tables:
+            try:
+                count_result = db.execute(text(f"SELECT COUNT(*) FROM {table}")).fetchone()
+                table_info[table] = count_result[0] if count_result else 0
+            except:
+                table_info[table] = "table not found"
+
+        db.close()
+
+        db_url = str(engine.url)
+        db_type = "PostgreSQL" if "postgresql" in db_url else "SQLite"
+
+        return {
+            "database_type": db_type,
+            "database_version": db_version,
+            "connection_pool": {
+                "size": engine.pool.size(),
+                "checked_out": engine.pool.checkedout(),
+                "overflow": engine.pool.overflow(),
+                "checked_in": engine.pool.checkedin()
+            },
+            "tables": table_info,
+            "url_masked": db_url.replace(db_url.split('@')[0].split('//')[1], "***:***") if '@' in db_url else "local"
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "database_type": "connection_failed"
+        }
+
+# Error handlers
+@app.exception_handler(404)
+async def not_found_handler(request, exc):
+    return JSONResponse(
+        status_code=404,
+        content={
+            "message": "Endpoint not found",
+            "available_endpoints": {
+                "frontend": "/",
+                "api_docs": "/api/docs",
+                "health": "/api/health",
+                "test": "/api/test"
+            }
+        }
+    )
+
+@app.exception_handler(500)
+async def internal_error_handler(request, exc):
+    logger.error(f"Internal server error: {str(exc)}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "message": "Internal server error",
+            "error": "Please check the application logs",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+
+# For Render deployment
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run(
-        "app:app",
+        "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=port,
         log_level="info"
     )
